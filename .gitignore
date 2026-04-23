@@ -1,0 +1,6 @@
+/target
+# Ignore the actual data
+/data/
+# Ignore any temp zips
+*.zip
+/tmp
