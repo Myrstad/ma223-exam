@@ -1,0 +1,25 @@
+{
+  "experiment_name": "author_classification_grid_v1",
+  "batch_size": 64,
+  "cnn": {
+    "conv_layers": 2,
+    "filters": [32, 64],
+    "kernel_size": 3,
+    "pool_size": 2,
+    "fc_neurons": 512,
+    "num_classes": 50
+  },
+  "early_stopping": {
+    "patience": 10,
+    "min_delta": 0.001
+  },
+  "data": {
+    "train_split": 0.8,
+    "valid_split": 0.2,
+    "forms_file": "data/iam_top50/forms_for_parsing.txt",
+    "images_dir": "data/iam_top50/data_subset"
+  },
+  "output": {
+    "base_dir": "results/experiments"
+  }
+}
