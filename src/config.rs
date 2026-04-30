@@ -69,6 +69,7 @@ pub struct EarlyStoppingConfig {
 pub struct DataConfig {
     pub train_split: f32,
     pub valid_split: f32,
+    pub test_split: f32,
     pub forms_file: String,
     pub images_dir: String,
 }

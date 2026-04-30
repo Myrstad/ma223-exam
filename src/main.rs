@@ -40,6 +40,7 @@ pub struct AuthorClassifier<B: Backend> {
     fc2: Linear<B>,
     dropout: nn::Dropout,
     batch_norm: nn::BatchNorm<B, 2>,
+    activation: String,
 }
 
 impl<B: Backend> AuthorClassifier<B> {
@@ -80,11 +81,17 @@ impl<B: Backend> AuthorClassifier<B> {
             fc2,
             dropout: DropoutConfig::new(config.dropout as f64).init(),
             batch_norm: BatchNormConfig::new(filter1).init(device),
+            activation: config.activation.clone(),
         }
     }
 
-    fn apply_activation(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        match self.fc1.devices()[0].clone() {
+    fn apply_activation<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
+        match self.activation.as_str() {
+            "relu" => burn::tensor::activation::relu(x),
+            "tanh" => burn::tensor::activation::tanh(x),
+            "sigmoid" => burn::tensor::activation::sigmoid(x),
+            "gelu" => burn::tensor::activation::gelu(x),
+            "silu" => burn::tensor::activation::silu(x),
             _ => burn::tensor::activation::gelu(x),
         }
     }
@@ -101,7 +108,7 @@ impl<B: Backend> AuthorClassifier<B> {
 
         let x = x.flatten(1, 3);
         let x = self.fc1.forward(x);
-        let x = burn::tensor::activation::gelu(x);
+        let x = self.apply_activation(x);
         let x = self.dropout.forward(x);
 
         self.fc2.forward(x)
@@ -204,28 +211,42 @@ fn main() {
     init_dataset().expect("Failed to initialize dataset");
     let device = WgpuDevice::default();
 
+    // Load config early - needed for data split
+    let app_config = Config::load("config/config.json")
+        .expect("Failed to load config");
+
     let forms_path = "data/iam_top50/forms_for_parsing.txt";
     let images_path = "data/iam_top50/data_subset";
 
     let metadata = data::load_metadata(forms_path, images_path)
         .expect("Failed to parse dataset metadata");
 
-    // Stratified split by author: 80% train, 20% valid for EACH author
-    let mut author_groups: std::collections::HashMap<i32, (Vec<usize>, Vec<usize>)> = std::collections::HashMap::new();
+    // Stratified split: from config
+    let mut author_groups: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
 
     for idx in 0..metadata.image_paths.len() {
         let label = metadata.labels[idx];
-        author_groups.entry(label).or_insert((Vec::new(), Vec::new())).0.push(idx);
+        author_groups.entry(label).or_insert(Vec::new()).push(idx);
     }
 
     let mut train_indices = Vec::new();
     let mut valid_indices = Vec::new();
+    let mut test_indices = Vec::new();
 
-    for (_, (train_ids, valid_ids)) in author_groups.iter_mut() {
-        let total = train_ids.len() + valid_ids.len();
-        let split = (total as f32 * 0.8) as usize;
-        train_indices.extend(train_ids[..split].iter().cloned());
-        valid_indices.extend(valid_ids.iter().chain(train_ids[split..].iter()).cloned());
+    for (_, indices) in author_groups.iter_mut() {
+        let total = indices.len();
+        let train_split = (total as f32 * app_config.data.train_split) as usize;
+        let valid_split = (total as f32 * (app_config.data.train_split + app_config.data.valid_split)) as usize;
+        
+        for (i, &idx) in indices.iter().enumerate() {
+            if i < train_split {
+                train_indices.push(idx);
+            } else if i < valid_split {
+                valid_indices.push(idx);
+            } else {
+                test_indices.push(idx);
+            }
+        }
     }
 
     fn create_dataset(metadata: &data::DatasetMetadata, indices: &[usize]) -> IAMDataset {
@@ -241,8 +262,10 @@ fn main() {
 
     let dataset_train = create_dataset(&metadata, &train_indices);
     let dataset_valid = create_dataset(&metadata, &valid_indices);
+    let dataset_test = create_dataset(&metadata, &test_indices);
 
-    println!("Train: {} samples, Valid: {} samples", train_indices.len(), valid_indices.len());
+    println!("Train: {} samples, Valid: {} samples, Test: {} samples", 
+        train_indices.len(), valid_indices.len(), test_indices.len());
 
     // Verify all authors appear in both sets
     let train_authors: std::collections::HashSet<_> = train_indices.iter().map(|&i| metadata.labels[i]).collect();
@@ -260,16 +283,16 @@ fn main() {
     // Load configs and run experiments
     let hyper = Hyperparameters::load("config/hyperparameters.json")
         .expect("Failed to load hyperparameters");
-    let cfg = Config::load("config/config.json")
+    let app_config = Config::load("config/config.json")
         .expect("Failed to load config");
 
     let experiments = hyper.iter_experiments();
     let total = experiments.len();
-    let prefix = &cfg.experiment_name;
+    let prefix = &app_config.experiment_name;
     
     println!("Loaded {} experiments to run", total);
     println!("Experiment prefix: {}", prefix);
-    println!("Config: batch_size={}, num_classes={}", cfg.batch_size, cfg.cnn.num_classes);
+    println!("Config: batch_size={}, num_classes={}", app_config.batch_size, app_config.cnn.num_classes);
     println!();
 
     // Count completed experiments
@@ -300,15 +323,17 @@ fn main() {
             exp,
             dataset_train.clone(),
             dataset_valid.clone(),
-            &cfg.cnn,
-            cfg.batch_size,
-            cfg.early_stopping.patience,
+            dataset_test.clone(),
+            &app_config.cnn,
+            app_config.batch_size,
+            app_config.early_stopping.patience,
             &device,
             prefix,
         );
         
-        println!("Final: train_acc={:.1}%, valid_loss={:.4}, valid_acc={:.1}%", 
-            results.final_train_acc * 100.0, results.best_valid_loss, results.best_valid_acc * 100.0);
+        println!("Final: train_acc={}, valid_loss={:.4}, valid_acc={}, test_acc={}", 
+            results.final_train_acc, results.best_valid_loss, results.best_valid_acc, 
+            results.test_acc);
         
         // Save results
         runner::save_results(&results.experiment_id, &history, &results, exp, prefix).expect("Failed to save results");
