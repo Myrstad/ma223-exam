@@ -4,3 +4,6 @@
 # Ignore any temp zips
 *.zip
 /tmp
+.idea
+results
+models

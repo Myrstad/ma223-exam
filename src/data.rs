@@ -10,6 +10,7 @@ const DATASET_PATH: &str = "./data/iam_top50";
 pub struct DatasetMetadata {
     pub image_paths: Vec<PathBuf>,
     pub labels: Vec<i32>,
+    pub authors: Vec<String>,
     pub num_classes: usize,
 }
 
@@ -66,6 +67,7 @@ pub fn load_metadata(forms_file: &str, data_dir: &str) -> io::Result<DatasetMeta
     // 2. Discover PNGs and Match
     let mut image_paths = Vec::new();
     let mut raw_labels = Vec::new();
+    let mut raw_authors = Vec::new();
     let mut unique_authors = HashMap::new();
     let mut class_count = 0;
 
@@ -89,6 +91,7 @@ pub fn load_metadata(forms_file: &str, data_dir: &str) -> io::Result<DatasetMeta
 
                 image_paths.push(path);
                 raw_labels.push(label);
+                raw_authors.push(author_id.clone());
             }
         }
     }
@@ -98,6 +101,7 @@ pub fn load_metadata(forms_file: &str, data_dir: &str) -> io::Result<DatasetMeta
     Ok(DatasetMetadata {
         image_paths,
         labels: raw_labels,
+        authors: raw_authors,
         num_classes: class_count as usize,
     })
 }

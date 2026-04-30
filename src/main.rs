@@ -1,24 +1,29 @@
 mod data;
 
-use burn::nn::{pool, BatchNormConfig, DropoutConfig, Linear, LinearConfig, PaddingConfig2d};
-use burn::backend::{Wgpu, wgpu::WgpuDevice};
+use std::fs;
+
+use crate::data::init_dataset;
 // We don't need Autodiff for the seed call itself,
 // but we'll use it for your model later.
 use burn::backend::Autodiff;
-use burn::prelude::{Backend, TensorData};
-use crate::data::init_dataset;
-use burn::data::dataset::Dataset;
-use image::io::Reader as ImageReader;
-use burn::tensor::{Tensor, Int, Data, Shape};
+use burn::backend::{wgpu::WgpuDevice, Wgpu};
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::DataLoaderBuilder;
+use burn::data::dataset::Dataset;
 use burn::module::Module;
 use burn::nn;
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::pool::MaxPool2d;
+use burn::nn::{BatchNormConfig, DropoutConfig, Linear, LinearConfig, PaddingConfig2d};
 use burn::optim::AdamConfig;
+use burn::prelude::{Backend, TensorData};
 use burn::tensor::backend::AutodiffBackend;
-use burn::train::{ClassificationOutput, LearnerBuilder, TrainOutput, TrainStep, ValidStep};
+use burn::tensor::{Int, Shape, Tensor};
+use burn::train::{
+    ClassificationOutput, LearnerBuilder,
+    TrainOutput, TrainStep, ValidStep,
+};
+use image::io::Reader as ImageReader;
 
 // In Burn 0.16, Wgpu defaults to <f32, i32, u8>.
 // You rarely need to specify the GraphicsApi manually anymore.
@@ -74,8 +79,8 @@ impl<B: Backend> AuthorClassifier<B> {
         }
     }
 
-    pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 2> {
-        let x = self.conv1.forward(input);
+    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 2> {
+        let x = self.conv1.forward(x);
         let x = self.batch_norm.forward(x);
         let x = burn::tensor::activation::gelu(x);
         let x = self.pool.forward(x);
@@ -91,7 +96,8 @@ impl<B: Backend> AuthorClassifier<B> {
 
         self.fc2.forward(x)
     }
-}
+
+    }
 
 // --- 2. DATASET & BATCHER ---
 #[derive(Clone, Debug)]
@@ -194,41 +200,85 @@ fn main() {
     let metadata = data::load_metadata(forms_path, images_path)
         .expect("Failed to parse dataset metadata");
 
-    let num_images = metadata.image_paths.len();
-    let split_index = (num_images as f32 * 0.8) as usize;
-    let dataset_train = IAMDataset::new(data::DatasetMetadata {
-        image_paths: metadata.image_paths[..split_index].to_vec(),
-        labels: metadata.labels[..split_index].to_vec(),
-        num_classes: 50,
-    });
-    let dataset_valid = IAMDataset::new(data::DatasetMetadata {
-        image_paths: metadata.image_paths[split_index..].to_vec(),
-        labels: metadata.labels[split_index..].to_vec(),
-        num_classes: 50,
-    });
+    // Stratified split by author: 80% train, 20% valid for EACH author
+    let mut author_groups: std::collections::HashMap<i32, (Vec<usize>, Vec<usize>)> = std::collections::HashMap::new();
+
+    for idx in 0..metadata.image_paths.len() {
+        let label = metadata.labels[idx];
+        author_groups.entry(label).or_insert((Vec::new(), Vec::new())).0.push(idx);
+    }
+
+    let mut train_indices = Vec::new();
+    let mut valid_indices = Vec::new();
+
+    for (_, (train_ids, valid_ids)) in author_groups.iter_mut() {
+        let total = train_ids.len() + valid_ids.len();
+        let split = (total as f32 * 0.8) as usize;
+        train_indices.extend(train_ids[..split].iter().cloned());
+        valid_indices.extend(valid_ids.iter().chain(train_ids[split..].iter()).cloned());
+    }
+
+    fn create_dataset(metadata: &data::DatasetMetadata, indices: &[usize]) -> IAMDataset {
+        let image_paths: Vec<_> = indices.iter().map(|&i| metadata.image_paths[i].clone()).collect();
+        let labels: Vec<_> = indices.iter().map(|&i| metadata.labels[i]).collect();
+        IAMDataset::new(data::DatasetMetadata {
+            image_paths,
+            labels,
+            authors: Vec::new(),
+            num_classes: metadata.num_classes,
+        })
+    }
+
+    let dataset_train = create_dataset(&metadata, &train_indices);
+    let dataset_valid = create_dataset(&metadata, &valid_indices);
+
+    println!("Train: {} samples, Valid: {} samples", train_indices.len(), valid_indices.len());
+
+    // Verify all authors appear in both sets
+    let train_authors: std::collections::HashSet<_> = train_indices.iter().map(|&i| metadata.labels[i]).collect();
+    let valid_authors: std::collections::HashSet<_> = valid_indices.iter().map(|&i| metadata.labels[i]).collect();
+    println!("Train authors: {}, Valid authors: {}", train_authors.len(), valid_authors.len());
+
+    let missing_in_train: Vec<_> = valid_authors.difference(&train_authors).collect();
+    let missing_in_valid: Vec<_> = train_authors.difference(&valid_authors).collect();
+    if missing_in_train.is_empty() && missing_in_valid.is_empty() {
+        println!("✅ All authors appear in both train and validation sets (closed-set)");
+    } else {
+        println!("⚠️ Authors missing - train: {:?}, valid: {:?}", missing_in_train, missing_in_valid);
+    }
+
+    // Hyperparameters - easy to tune
+    let learning_rate = 1e-4;
+    let batch_size = 64;
+    let dropout = 0.3;
+    let num_epochs = 50;
+
+    // Create results directory
+    fs::create_dir_all("results").ok();
 
     let batcher_train = IAMBatcher::<MyAutodiffBackend>::new(device.clone());
     let batcher_valid = IAMBatcher::<MyBackend>::new(device.clone());
 
     let dataloader_train = DataLoaderBuilder::new(batcher_train)
-        .batch_size(64).shuffle(42).num_workers(8).build(dataset_train);
+        .batch_size(batch_size).shuffle(42).num_workers(8).build(dataset_train);
     let dataloader_valid = DataLoaderBuilder::new(batcher_valid)
-        .batch_size(64).shuffle(42).num_workers(8).build(dataset_valid);
+        .batch_size(batch_size).shuffle(42).num_workers(8).build(dataset_valid);
 
-    let learner = LearnerBuilder::new("./tmp/iam-classification")
+    let learner = LearnerBuilder::new("./results/iam-classification")
         .metric_train_numeric(burn::train::metric::AccuracyMetric::new())
         .metric_valid_numeric(burn::train::metric::AccuracyMetric::new())
         .metric_train_numeric(burn::train::metric::LossMetric::new())
         .metric_valid_numeric(burn::train::metric::LossMetric::new())
         .with_file_checkpointer(burn::record::CompactRecorder::new())
         .devices(vec![device.clone()])
-        .num_epochs(50)
+        .num_epochs(10)
         .build(
             AuthorClassifier::<MyAutodiffBackend>::new(&device),
             AdamConfig::new().init(),
-            1e-4, // Learning Rate
+            learning_rate,
         );
 
     let _model_trained = learner.fit(dataloader_train, dataloader_valid);
-    println!("Training complete! Checkpoints saved to ./tmp/iam-classification");
+    println!("Training complete!");
+    println!("Hyperparams: lr={}, batch_size={}, dropout={}, epochs={}", learning_rate, batch_size, dropout, num_epochs);
 }
