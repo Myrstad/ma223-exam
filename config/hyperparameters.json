@@ -1,6 +1,6 @@
 {
   "max_epochs": [25],
-  "dropout": [0.2],
-  "learning_rate": [0.01, 0.0068, 0.0046, 0.0032, 0.0022, 0.0015, 0.001, 0.00068, 0.00046, 0.00032],
-  "activation": ["relu", "gelu", "silu", "tanh", "sigmoid"]
+  "dropout": [0.4],
+  "learning_rate": [0.001],
+  "activation": ["gelu", "linear"]
 }

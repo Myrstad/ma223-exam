@@ -1,12 +1,13 @@
 {
-  "experiment_name": "ActivationComparison",
-  "batch_size": 64,
+  "experiment_name": "Linear with repetition v2",
+  "num_repeats": 5,
+  "batch_size": 128,
   "cnn": {
     "conv_layers": 2,
-    "filters": [32, 64],
+    "filters": [32, 64, 128],
     "kernel_size": 3,
     "pool_size": 2,
-    "fc_neurons": 512,
+    "fc_neurons": 128,
     "num_classes": 50
   },
   "early_stopping": {

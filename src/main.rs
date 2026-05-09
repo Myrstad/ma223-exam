@@ -5,8 +5,6 @@ mod runner;
 use crate::config::{Config, Hyperparameters, ModelConfig};
 use crate::data::init_dataset;
 use crate::runner::run_experiment;
-// We don't need Autodiff for the seed call itself,
-// but we'll use it for your model later.
 use burn::backend::Autodiff;
 use burn::backend::{wgpu::WgpuDevice, Wgpu};
 use burn::data::dataloader::batcher::Batcher;
@@ -25,21 +23,18 @@ use burn::train::{
 };
 use image::io::Reader as ImageReader;
 
-// In Burn 0.16, Wgpu defaults to <f32, i32, u8>.
-// You rarely need to specify the GraphicsApi manually anymore.
 type MyBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<MyBackend>;
 
 // --- 1. THE MODEL ---
 #[derive(Module, Debug)]
 pub struct AuthorClassifier<B: Backend> {
-    conv1: Conv2d<B>,
-    conv2: Conv2d<B>,
-    pool: MaxPool2d,
+    conv_layers: Vec<Conv2d<B>>,
+    pool_layers: Vec<MaxPool2d>,
+    batch_norms: Vec<nn::BatchNorm<B, 2>>,
     fc1: Linear<B>,
     fc2: Linear<B>,
     dropout: nn::Dropout,
-    batch_norm: nn::BatchNorm<B, 2>,
     activation: String,
 }
 
@@ -50,23 +45,45 @@ impl<B: Backend> AuthorClassifier<B> {
             fan_out_only: false,
         };
 
-        let filter1 = config.filters[0] as usize;
-        let filter2 = config.filters.get(1).copied().unwrap_or(config.filters[0]) as usize;
+        let num_conv_layers = config.filters.len();
+        let mut conv_layers = Vec::with_capacity(num_conv_layers);
+        let mut pool_layers = Vec::with_capacity(num_conv_layers);
+        let mut batch_norms = Vec::with_capacity(num_conv_layers);
 
-        let conv1 = Conv2dConfig::new([1, filter1], [3, 3])
-            .with_padding(PaddingConfig2d::Same)
-            .with_initializer(initializer.clone())
-            .init(device);
-        let conv2 = Conv2dConfig::new([filter1, filter2], [3, 3])
-            .with_padding(PaddingConfig2d::Same)
-            .with_initializer(initializer.clone())
-            .init(device);
+        let mut in_channels = 1;
 
-        let pool_config = nn::pool::MaxPool2dConfig::new([2, 2])
-            .with_strides([2, 2])
-            .init();
+        let kernel_size = [config.kernel_size as usize, config.kernel_size as usize];
+        let pool_size = [config.pool_size as usize, config.pool_size as usize];
 
-        let fc1 = LinearConfig::new(filter2 * 16 * 16, config.fc_neurons as usize)
+        for i in 0..num_conv_layers {
+            let out_channels = config.filters[i] as usize;
+
+            let conv = Conv2dConfig::new([in_channels, out_channels], kernel_size)
+                .with_padding(PaddingConfig2d::Same)
+                .with_initializer(initializer.clone())
+                .init(device);
+            conv_layers.push(conv);
+
+            let pool = nn::pool::MaxPool2dConfig::new(pool_size)
+                .with_strides(pool_size) // use stride == pool_size typically
+                .init();
+            pool_layers.push(pool);
+
+            let bn = BatchNormConfig::new(out_channels).init(device);
+            batch_norms.push(bn);
+
+            in_channels = out_channels;
+        }
+
+        // Calculate flattened size after pooling
+        // initial image is 64x64
+        let mut spatial_dim = 64;
+        for _ in 0..num_conv_layers {
+            spatial_dim = spatial_dim / (config.pool_size as usize);
+        }
+        let flattened_size = in_channels * spatial_dim * spatial_dim;
+
+        let fc1 = LinearConfig::new(flattened_size, config.fc_neurons as usize)
             .with_initializer(initializer)
             .init(device);
 
@@ -74,13 +91,12 @@ impl<B: Backend> AuthorClassifier<B> {
             .init(device);
 
         Self {
-            conv1,
-            conv2,
-            pool: pool_config,
+            conv_layers,
+            pool_layers,
+            batch_norms,
             fc1,
             fc2,
             dropout: DropoutConfig::new(config.dropout as f64).init(),
-            batch_norm: BatchNormConfig::new(filter1).init(device),
             activation: config.activation.clone(),
         }
     }
@@ -98,14 +114,14 @@ impl<B: Backend> AuthorClassifier<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 2> {
-        let x = self.conv1.forward(x);
-        let x = self.batch_norm.forward(x);
-        let x = self.apply_activation(x);
-        let x = self.pool.forward(x);
+        let mut x = x;
 
-        let x = self.conv2.forward(x);
-        let x = self.apply_activation(x);
-        let x = self.pool.forward(x);
+        for i in 0..self.conv_layers.len() {
+            x = self.conv_layers[i].forward(x);
+            x = self.batch_norms[i].forward(x);
+            x = self.apply_activation(x);
+            x = self.pool_layers[i].forward(x);
+        }
 
         let x = x.flatten(1, 3);
         let x = self.fc1.forward(x);
@@ -288,24 +304,45 @@ fn main() {
         .expect("Failed to load config");
 
     let experiments = hyper.iter_experiments();
-    let total = experiments.len();
+    let total = experiments.len() * (app_config.num_repeats as usize);
     let prefix = &app_config.experiment_name;
     
-    println!("Loaded {} experiments to run", total);
+    println!("Loaded {} experiment configurations to run {} repeats each ({} total)",
+             experiments.len(), app_config.num_repeats, total);
     println!("Experiment prefix: {}", prefix);
     println!("Config: batch_size={}, num_classes={}", app_config.batch_size, app_config.cnn.num_classes);
     println!();
 
     // Count completed experiments
     let mut completed = 0;
+
+    #[derive(Clone, Debug)]
+    struct ExpRun {
+        exp: crate::config::ExperimentParams,
+        repeat_idx: u32,
+        run_id: String,
+    }
+
     let mut pending = Vec::new();
     
     for exp in &experiments {
-        let exp_dir = format!("results/experiments/{}/{}", prefix, exp.id);
-        if std::path::Path::new(&exp_dir).exists() {
-            completed += 1;
-        } else {
-            pending.push(exp.clone());
+        for repeat in 0..app_config.num_repeats {
+            let run_id = if app_config.num_repeats > 1 {
+                format!("{}_rep{}", exp.id, repeat + 1)
+            } else {
+                exp.id.clone()
+            };
+
+            let exp_dir = format!("results/experiments/{}/{}", prefix, run_id);
+            if std::path::Path::new(&exp_dir).exists() {
+                completed += 1;
+            } else {
+                pending.push(ExpRun {
+                    exp: exp.clone(),
+                    repeat_idx: repeat,
+                    run_id,
+                });
+            }
         }
     }
     
@@ -317,11 +354,15 @@ fn main() {
     println!("{} already completed, {} to run\n", completed, pending.len());
     
     // Run pending experiments
-    for (i, exp) in pending.iter().enumerate() {
-        println!("=== [{}/{}] Running experiment {} ===", i + 1, pending.len(), exp.id);
+    for (i, run) in pending.iter().enumerate() {
+        println!("=== [{}/{}] Running experiment {} ===", i + 1, pending.len(), run.run_id);
+
+        // We clone the experiment and override the ID so runner saves to correct path
+        let mut run_exp = run.exp.clone();
+        run_exp.id = run.run_id.clone();
         
         let (history, results) = run_experiment(
-            exp,
+            &run_exp,
             dataset_train.clone(),
             dataset_valid.clone(),
             dataset_test.clone(),
@@ -337,8 +378,8 @@ fn main() {
             results.test_acc);
         
         // Save results
-        runner::save_results(&results.experiment_id, &history, &results, exp, prefix).expect("Failed to save results");
-        println!("Results saved to results/experiments/{}/{}\n", prefix, exp.id);
+        runner::save_results(&results.experiment_id, &history, &results, &run_exp, prefix).expect("Failed to save results");
+        println!("Results saved to results/experiments/{}/{}\n", prefix, run_exp.id);
     }
     
     println!("=== All {} experiments completed! ===", total);

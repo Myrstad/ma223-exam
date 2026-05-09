@@ -41,6 +41,8 @@ pub struct CnnConfig {
 #[derive(Clone, Debug)]
 pub struct ModelConfig {
     pub filters: Vec<u32>,
+    pub kernel_size: u32,
+    pub pool_size: u32,
     pub fc_neurons: u32,
     pub dropout: f32,
     pub activation: String,
@@ -51,6 +53,8 @@ impl ModelConfig {
     pub fn from_cnn_and_hyper(cnn: &CnnConfig, dropout: f32, activation: String) -> Self {
         Self {
             filters: cnn.filters.clone(),
+            kernel_size: cnn.kernel_size,
+            pool_size: cnn.pool_size,
             fc_neurons: cnn.fc_neurons,
             dropout,
             activation,
@@ -79,9 +83,13 @@ pub struct OutputConfig {
     pub base_dir: String,
 }
 
+fn default_repeats() -> u32 { 1 }
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub experiment_name: String,
+    #[serde(default = "default_repeats")]
+    pub num_repeats: u32,
     pub batch_size: u32,
     pub cnn: CnnConfig,
     pub early_stopping: EarlyStoppingConfig,
@@ -256,6 +264,7 @@ mod tests {
     fn test_parse_config() {
         let content = r#"{
             "experiment_name": "test_exp",
+            "num_repeats": 2,
             "batch_size": 64,
             "cnn": {
                 "conv_layers": 2,
@@ -272,6 +281,7 @@ mod tests {
             "data": {
                 "train_split": 0.8,
                 "valid_split": 0.2,
+                "test_split": 0.0,
                 "forms_file": "data/forms.txt",
                 "images_dir": "data/images"
             },
@@ -284,6 +294,7 @@ mod tests {
         let config = Config::load(file.path().to_str().unwrap()).unwrap();
         
         assert_eq!(config.experiment_name, "test_exp");
+        assert_eq!(config.num_repeats, 2);
         assert_eq!(config.batch_size, 64);
         assert_eq!(config.cnn.num_classes, 50);
         assert_eq!(config.early_stopping.patience, 10);

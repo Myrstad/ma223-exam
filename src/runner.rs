@@ -9,7 +9,7 @@ use burn::train::LearnerBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ExperimentParams, ModelConfig};
-use crate::{AuthorClassifier, IAMDataset, IAMBatcher, MyAutodiffBackend, MyBackend};
+use crate::{AuthorClassifier, IAMBatcher, IAMDataset, MyAutodiffBackend, MyBackend};
 
 pub struct TrainingHistory {
     pub train_loss: Vec<f32>,
@@ -137,7 +137,7 @@ pub fn run_experiment(
         .metric_valid_numeric(burn::train::metric::AccuracyMetric::new())
         .metric_train_numeric(burn::train::metric::LossMetric::new())
         .metric_valid_numeric(burn::train::metric::LossMetric::new())
-        .with_file_checkpointer(burn::record::CompactRecorder::new())
+        .with_file_checkpointer(CompactRecorder::new())
         .devices(vec![device.clone()])
         .num_epochs(max_epochs as usize)
         .build(
@@ -187,7 +187,7 @@ pub fn run_experiment(
     
     // Evaluate on test set using best validation model (find checkpoint in best/ folder)
     let (test_loss, test_acc, test_num_correct, test_results_csv, confusion_csv) = 
-        evaluate_test_set(&model_dir, &dataset_test, max_epochs, cnn_config.num_classes, device, batch_size, prefix, &experiment.id);
+        evaluate_test_set(&model_dir, &dataset_test, max_epochs, &model_config, device, batch_size, prefix, &experiment.id);
     let test_num_samples = dataset_test.labels.len() as u32;
     
     let history = TrainingHistory::new();
@@ -212,10 +212,32 @@ pub fn run_experiment(
     let _ = fs::write(format!("{}/test_results.csv", exp_dir), test_results_csv);
     let _ = fs::write(format!("{}/confusion_matrix.csv", exp_dir), confusion_csv);
 
-println!("  {} completed in {:.1}s: train_acc={}, valid_acc={} (epoch {}), test_acc={}", 
+    // Build History CSVs BEFORE we delete the model directory
+    let mut train_csv = String::from("epoch,loss,accuracy\n");
+    let mut valid_csv = String::from("epoch,loss,accuracy\n");
+
+    for epoch in 1..=max_epochs {
+        let tlp = format!("{}/train/epoch-{}/Loss.log", model_dir, epoch);
+        let tap = format!("{}/train/epoch-{}/Accuracy.log", model_dir, epoch);
+        let vlp = format!("{}/valid/epoch-{}/Loss.log", model_dir, epoch);
+        let vap = format!("{}/valid/epoch-{}/Accuracy.log", model_dir, epoch);
+
+        let tl = read_last_metric(&tlp);
+        let ta = read_last_metric(&tap);
+        let vl = read_last_metric(&vlp);
+        let va = read_last_metric(&vap);
+
+        train_csv.push_str(&format!("{},{},{}\n", epoch, tl, ta));
+        valid_csv.push_str(&format!("{},{},{}\n", epoch, vl, va));
+    }
+
+    let _ = fs::write(format!("{}/history_train.csv", exp_dir), train_csv);
+    let _ = fs::write(format!("{}/history_valid.csv", exp_dir), valid_csv);
+
+    println!("  {} completed in {:.1}s: train_acc={}, valid_acc={} (epoch {}), test_acc={}",
         experiment.id, runtime, final_train_acc, best_valid_acc, best_epoch, test_acc);
     
-    // Delete model directory to save disk space
+    // NOW we can delete model directory to save disk space
     let _ = fs::remove_dir_all(&model_dir);
     
     (history, results)
@@ -225,20 +247,13 @@ fn evaluate_test_set(
     model_dir: &str,
     dataset_test: &IAMDataset,
     _max_epochs: u32,
-    num_classes: u32,
+    model_config: &ModelConfig,
     device: &burn::backend::wgpu::WgpuDevice,
     batch_size: u32,
     _prefix: &str,
     _exp_id: &str,
 ) -> (f32, f32, u32, String, String) {
-    // Create model config
-    let model_config = ModelConfig {
-        filters: vec![32, 64],
-        fc_neurons: 512,
-        dropout: 0.3,
-        activation: "gelu".to_string(),
-        num_classes,
-    };
+    let num_classes = model_config.num_classes;
     
     // Find any checkpoint in best/ folder
     let best_dir = format!("{}/best", model_dir);
@@ -253,10 +268,10 @@ fn evaluate_test_set(
             loaded_epoch = epoch;
             break;
         }
-}
+    }
      
      // Create model first, then try to load record into it
-     let mut model = AuthorClassifier::<MyBackend>::new(device, &model_config);
+     let mut model = AuthorClassifier::<MyBackend>::new(device, model_config);
      
      if loaded_epoch > 0 {
          match CompactRecorder::new().load(std::path::PathBuf::from(&model_record_path), device) {
@@ -374,28 +389,6 @@ pub fn save_results(
         format!("{}/summary.json", base_dir),
         serde_json::to_string_pretty(&summary)?,
     )?;
-
-    let model_base = format!("{}/model", base_dir);
-    let mut train_csv = String::from("epoch,loss,accuracy\n");
-    let mut valid_csv = String::from("epoch,loss,accuracy\n");
-    
-    for epoch in 1..=results.total_epochs {
-        let tlp = format!("{}/train/epoch-{}/Loss.log", model_base, epoch);
-        let tap = format!("{}/train/epoch-{}/Accuracy.log", model_base, epoch);
-        let vlp = format!("{}/valid/epoch-{}/Loss.log", model_base, epoch);
-        let vap = format!("{}/valid/epoch-{}/Accuracy.log", model_base, epoch);
-        
-        let tl = read_last_metric(&tlp);
-        let ta = read_last_metric(&tap);
-        let vl = read_last_metric(&vlp);
-        let va = read_last_metric(&vap);
-        
-        train_csv.push_str(&format!("{},{},{}\n", epoch, tl, ta));
-        valid_csv.push_str(&format!("{},{},{}\n", epoch, vl, va));
-    }
-    
-    fs::write(format!("{}/history_train.csv", base_dir), train_csv)?;
-    fs::write(format!("{}/history_valid.csv", base_dir), valid_csv)?;
 
     // Update master summary
     update_master_summary(prefix, exp_id, experiment, results)?;
