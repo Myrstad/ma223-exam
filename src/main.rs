@@ -92,6 +92,7 @@ impl<B: Backend> AuthorClassifier<B> {
             "sigmoid" => burn::tensor::activation::sigmoid(x),
             "gelu" => burn::tensor::activation::gelu(x),
             "silu" => burn::tensor::activation::silu(x),
+            "linear" => x,
             _ => burn::tensor::activation::gelu(x),
         }
     }
