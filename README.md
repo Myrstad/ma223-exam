@@ -17,7 +17,7 @@ For instance if you have set:
 "activation": ["gelu", "linear"]
 }
 ```
-Experiments, gelu@0.001LR, gelu@0.05LR, linear@0.001LR, and linear@0.05LR will run.
+Experiments, `gelu@0.001LR`, `gelu@0.05LR`, `linear@0.001LR`, and `linear@0.05LR` will run.
 The `hyperparameters.json` file is for experimenting with hyperparamters. And `config.json` file is for more general experiment setup. Such as the name.
 
 ## Running experiments
