@@ -4,7 +4,8 @@ use std::fs::File;
 use std::io::{BufRead, Cursor};
 use std::path::{Path, PathBuf};
 
-const DATASET_URL: &str = "https://www.kaggle.com/api/v1/datasets/download/tejasreddy/iam-handwriting-top50"; // Use a direct link if possible
+
+const DATASET_URL: &str = "https://www.kaggle.com/api/v1/datasets/download/tejasreddy/iam-handwriting-top50";
 const DATASET_PATH: &str = "./data/iam_top50";
 
 pub struct DatasetMetadata {
@@ -18,24 +19,22 @@ pub fn init_dataset() -> Result<(), Box<dyn std::error::Error>> {
     let path = Path::new(DATASET_PATH);
 
     if path.exists() {
-        println!("✅ Dataset found at {:?}", DATASET_PATH);
+        println!("Dataset found at {:?}", DATASET_PATH);
         return Ok(());
     }
 
-    println!("🚀 Dataset not found. Downloading...");
+    println!("Dataset not found. Downloading...");
 
-    // 1. Create data directory
     fs::create_dir_all("./data")?;
 
-    // 2. Download the file (blocking call for simplicity in init)
+    // Download the file
     let response = reqwest::blocking::get(DATASET_URL)?;
     let mut content = Cursor::new(response.bytes()?);
 
-    // 3. Unzip directly to the folder
-    println!("📦 Extracting dataset...");
+    println!("Extracting dataset...");
     zip_extract::extract(&mut content, path, true)?;
 
-    println!("✨ Dataset ready!");
+    println!("Dataset ready!");
     Ok(())
 }
 
@@ -46,7 +45,7 @@ fn extract_form_id(filename: &str) -> Option<String> {
 pub fn load_metadata(forms_file: &str, data_dir: &str) -> io::Result<DatasetMetadata> {
     let mut form_to_author: HashMap<String, String> = HashMap::new();
 
-    // 1. Parse the text file
+    // Parse the text file
     let file = File::open(forms_file)?;
     for line in io::BufReader::new(file).lines() {
         let l = line?;
@@ -57,21 +56,17 @@ pub fn load_metadata(forms_file: &str, data_dir: &str) -> io::Result<DatasetMeta
         let parts: Vec<&str> = l.split_whitespace().collect();
         if parts.len() >= 2 {
             let form_id = parts[0].to_string();
-            // In the IAM format, the author key is usually the second column (parts[1])
-            // Your Python code used parts[-1], adjust if your text file differs
             let author_id = parts[1].to_string();
             form_to_author.insert(form_id, author_id);
         }
     }
 
-    // 2. Discover PNGs and Match
     let mut image_paths = Vec::new();
     let mut raw_labels = Vec::new();
     let mut raw_authors = Vec::new();
     let mut unique_authors = HashMap::new();
     let mut class_count = 0;
 
-    // Using glob-like behavior via standard walkdir (you'll need the `walkdir` crate)
     for entry in walkdir::WalkDir::new(data_dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -96,7 +91,7 @@ pub fn load_metadata(forms_file: &str, data_dir: &str) -> io::Result<DatasetMeta
         }
     }
 
-    println!("✅ Matched {} images for {} authors", image_paths.len(), class_count);
+    println!("Matched {} images for {} authors", image_paths.len(), class_count);
 
     Ok(DatasetMetadata {
         image_paths,
